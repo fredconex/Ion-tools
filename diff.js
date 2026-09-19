@@ -58,7 +58,7 @@ async function handler(args, api) {
         throw new Error(`File does not exist or could not be read: '${args.file_b}'`);
     }
 
-    // 3. Check if both files are empty (handles whitespace-only as well if trimmed)
+    // 3. Check if both files are empty
     if (txtA.trim() === "" && txtB.trim() === "") {
         throw new Error("Nothing to compare: both files are empty.");
     }
@@ -83,112 +83,244 @@ async function handler(args, api) {
     const linesA = txtA.split('\n');
     const linesB = txtB.split('\n');
 
-    // Optimization: Trim common leading and trailing lines
-    let startA = 0;
-    let startB = 0;
-    while (startA < linesA.length && startB < linesB.length && linesA[startA] === linesB[startB]) {
-        startA++;
-        startB++;
+    // 4. Line Interning: Map each unique string to a 32-bit integer ID for O(1) comparisons
+    const stringMap = new Map();
+    function intern(str) {
+        let id = stringMap.get(str);
+        if (id === undefined) {
+            id = stringMap.size;
+            stringMap.set(str, id);
+        }
+        return id;
     }
 
-    let endA = linesA.length - 1;
-    let endB = linesB.length - 1;
-    while (endA >= startA && endB >= startB && linesA[endA] === linesB[endB]) {
-        endA--;
-        endB--;
+    const idsA = new Int32Array(linesA.length);
+    for (let i = 0; i < linesA.length; i++) idsA[i] = intern(linesA[i]);
+
+    const idsB = new Int32Array(linesB.length);
+    for (let i = 0; i < linesB.length; i++) idsB[i] = intern(linesB[i]);
+
+    const fullEdits = [];
+
+    // Binary-search Longest Increasing Subsequence (LIS) for Patience Diff anchors
+    function computeLIS(items) {
+        const n = items.length;
+        if (n === 0) return [];
+
+        const tails = [];
+        const prev = new Int32Array(n);
+        prev.fill(-1);
+
+        for (let i = 0; i < n; i++) {
+            const val = items[i].bIdx;
+            let l = 0, r = tails.length - 1;
+            let pos = tails.length;
+            while (l <= r) {
+                const mid = (l + r) >> 1;
+                if (items[tails[mid]].bIdx >= val) {
+                    pos = mid;
+                    r = mid - 1;
+                } else {
+                    l = mid + 1;
+                }
+            }
+
+            if (pos > 0) prev[i] = tails[pos - 1];
+            if (pos === tails.length) tails.push(i);
+            else tails[pos] = i;
+        }
+
+        const res = [];
+        let curr = tails[tails.length - 1];
+        while (curr !== -1) {
+            res.push(items[curr]);
+            curr = prev[curr];
+        }
+        res.reverse();
+        return res;
     }
 
-    // Core diff using Myers' LCS algorithm on the middle slice
-    function computeEdits(a, b, offsetA, offsetB) {
-        const N = a.length;
-        const M = b.length;
-        const MAX = N + M;
-        const v = { 1: 0 };
+    // Fast Myers LCS using TypedArrays for small sub-slices (O(ND) without GC overhead)
+    function myersSmall(startA, endA, startB, endB) {
+        const lenA = endA - startA + 1;
+        const lenB = endB - startB + 1;
+        const maxD = lenA + lenB;
+        const offset = maxD;
+
+        const v = new Int32Array(2 * maxD + 1);
+        v.fill(-1);
+        v[offset + 1] = 0;
+
         const trace = [];
 
-        for (let d = 0; d <= MAX; d++) {
-            trace.push(Object.assign({}, v));
+        for (let d = 0; d <= maxD; d++) {
+            const snapshot = new Int32Array(2 * d + 1);
+            snapshot.set(v.subarray(offset - d, offset + d + 1));
+            trace.push(snapshot);
+
             for (let k = -d; k <= d; k += 2) {
+                const kIdx = offset + k;
                 let x;
-                if (k === -d || (k !== d && (v[k - 1] < v[k + 1]))) {
-                    x = v[k + 1];
+                if (k === -d || (k !== d && v[kIdx - 1] < v[kIdx + 1])) {
+                    x = v[kIdx + 1];
                 } else {
-                    x = v[k - 1] + 1;
+                    x = v[kIdx - 1] + 1;
                 }
                 let y = x - k;
-                while (x < N && y < M && a[x] === b[y]) {
+
+                while (x < lenA && y < lenB && idsA[startA + x] === idsB[startB + y]) {
                     x++;
                     y++;
                 }
-                v[k] = x;
-                if (x >= N && y >= M) {
-                    return backtrack(trace, a, b, offsetA, offsetB);
+                v[kIdx] = x;
+
+                if (x >= lenA && y >= lenB) {
+                    // Backtrack with push() + reverse() to avoid O(N^2) unshift
+                    const localEdits = [];
+                    let cx = lenA;
+                    let cy = lenB;
+
+                    for (let cd = d; cd > 0; cd--) {
+                        const prevTrace = trace[cd - 1];
+                        const prevOff = cd - 1;
+                        const ck = cx - cy;
+                        let prevK;
+
+                        if (ck === -cd || (ck !== cd && prevTrace[prevOff + ck - 1] < prevTrace[prevOff + ck + 1])) {
+                            prevK = ck + 1;
+                        } else {
+                            prevK = ck - 1;
+                        }
+
+                        const prevX = prevTrace[prevOff + prevK];
+                        const prevY = prevX - prevK;
+
+                        while (cx > prevX && cy > prevY) {
+                            cx--; cy--;
+                            localEdits.push({ type: 'keep', lineA: startA + cx + 1, lineB: startB + cy + 1, text: linesA[startA + cx] });
+                        }
+
+                        if (cx === prevX) {
+                            cy--;
+                            localEdits.push({ type: 'add', lineA: startA + cx + 1, lineB: startB + cy + 1, text: linesB[startB + cy] });
+                        } else {
+                            cx--;
+                            localEdits.push({ type: 'delete', lineA: startA + cx + 1, lineB: startB + cy + 1, text: linesA[startA + cx] });
+                        }
+                    }
+
+                    while (cx > 0 && cy > 0) {
+                        cx--; cy--;
+                        localEdits.push({ type: 'keep', lineA: startA + cx + 1, lineB: startB + cy + 1, text: linesA[startA + cx] });
+                    }
+
+                    localEdits.reverse();
+                    return localEdits;
                 }
             }
         }
         return [];
     }
 
-    function backtrack(trace, a, b, offsetA, offsetB) {
-        const edits = [];
-        let x = a.length;
-        let y = b.length;
+    // Core Patience Diff: partitions files along unique matching anchors
+    function diffSlice(startA, endA, startB, endB) {
+        // 1. Common prefix
+        while (startA <= endA && startB <= endB && idsA[startA] === idsB[startB]) {
+            fullEdits.push({ type: 'keep', lineA: startA + 1, lineB: startB + 1, text: linesA[startA] });
+            startA++;
+            startB++;
+        }
 
-        for (let d = trace.length - 1; d > 0; d--) {
-            const k = x - y;
-            let prevK;
-            if (k === -d || (k !== d && (trace[d - 1][k - 1] < trace[d - 1][k + 1]))) {
-                prevK = k + 1;
+        // 2. Common suffix
+        let suffixCount = 0;
+        while (endA >= startA && endB >= startB && idsA[endA] === idsB[endB]) {
+            endA--;
+            endB--;
+            suffixCount++;
+        }
+
+        // Base cases
+        if (startA > endA) {
+            for (let j = startB; j <= endB; j++) {
+                fullEdits.push({ type: 'add', lineA: startA + 1, lineB: j + 1, text: linesB[j] });
+            }
+        } else if (startB > endB) {
+            for (let i = startA; i <= endA; i++) {
+                fullEdits.push({ type: 'delete', lineA: i + 1, lineB: startB + 1, text: linesA[i] });
+            }
+        } else {
+            // Find unique lines in both slices
+            const countA = new Map();
+            for (let i = startA; i <= endA; i++) {
+                const id = idsA[i];
+                countA.set(id, (countA.get(id) || 0) + 1);
+            }
+
+            const countB = new Map();
+            const posB = new Map();
+            for (let j = startB; j <= endB; j++) {
+                const id = idsB[j];
+                countB.set(id, (countB.get(id) || 0) + 1);
+                posB.set(id, j);
+            }
+
+            const uniqueMatches = [];
+            for (let i = startA; i <= endA; i++) {
+                const id = idsA[i];
+                if (countA.get(id) === 1 && countB.get(id) === 1) {
+                    uniqueMatches.push({ aIdx: i, bIdx: posB.get(id) });
+                }
+            }
+
+            if (uniqueMatches.length > 0) {
+                // Anchored via Longest Increasing Subsequence
+                const anchors = computeLIS(uniqueMatches);
+                let curA = startA;
+                let curB = startB;
+
+                for (let k = 0; k < anchors.length; k++) {
+                    const match = anchors[k];
+                    diffSlice(curA, match.aIdx - 1, curB, match.bIdx - 1);
+                    fullEdits.push({ type: 'keep', lineA: match.aIdx + 1, lineB: match.bIdx + 1, text: linesA[match.aIdx] });
+                    curA = match.aIdx + 1;
+                    curB = match.bIdx + 1;
+                }
+                diffSlice(curA, endA, curB, endB);
             } else {
-                prevK = k - 1;
-            }
-            const prevX = trace[d - 1][prevK];
-            const prevY = prevX - prevK;
+                // Check if slices have ANY common lines
+                let hasCommon = false;
+                for (const id of countA.keys()) {
+                    if (countB.has(id)) {
+                        hasCommon = true;
+                        break;
+                    }
+                }
 
-            while (x > prevX && y > prevY) {
-                edits.unshift({ type: 'keep', lineA: offsetA + x, lineB: offsetB + y, text: a[x - 1] });
-                x--;
-                y--;
-            }
-
-            if (d > 0) {
-                if (x === prevX) {
-                    edits.unshift({ type: 'add', lineB: offsetB + y, text: b[y - 1] });
-                    y--;
-                } else if (y === prevY) {
-                    edits.unshift({ type: 'delete', lineA: offsetA + x, text: a[x - 1] });
-                    x--;
+                if (!hasCommon || (endA - startA + 1) * (endB - startB + 1) > 2000000) {
+                    // Fast path: disjoint sets or oversized repeated blocks
+                    for (let i = startA; i <= endA; i++) {
+                        fullEdits.push({ type: 'delete', lineA: i + 1, lineB: startB + 1, text: linesA[i] });
+                    }
+                    for (let j = startB; j <= endB; j++) {
+                        fullEdits.push({ type: 'add', lineA: endA + 1, lineB: j + 1, text: linesB[j] });
+                    }
+                } else {
+                    // Small subproblem without unique lines: fallback to Myers LCS
+                    const edits = myersSmall(startA, endA, startB, endB);
+                    fullEdits.push(...edits);
                 }
             }
         }
 
-        while (x > 0 && y > 0) {
-            edits.unshift({ type: 'keep', lineA: offsetA + x, lineB: offsetB + y, text: a[x - 1] });
-            x--;
-            y--;
+        // Add back trimmed suffix
+        for (let s = 0; s < suffixCount; s++) {
+            const idxA = endA + 1 + s;
+            const idxB = endB + 1 + s;
+            fullEdits.push({ type: 'keep', lineA: idxA + 1, lineB: idxB + 1, text: linesA[idxA] });
         }
-        return edits;
     }
 
-    // Assemble full edits list
-    const fullEdits = [];
-    
-    // 1. Common prefix
-    for (let i = 0; i < startA; i++) {
-        fullEdits.push({ type: 'keep', lineA: i + 1, lineB: i + 1, text: linesA[i] });
-    }
-
-    // 2. Modified middle section
-    const middleA = linesA.slice(startA, endA + 1);
-    const middleB = linesB.slice(startB, endB + 1);
-    const middleEdits = computeEdits(middleA, middleB, startA, startB);
-    fullEdits.push(...middleEdits);
-
-    // 3. Common suffix
-    for (let i = endA + 1; i < linesA.length; i++) {
-        const lineBIdx = endB + 1 + (i - (endA + 1));
-        fullEdits.push({ type: 'keep', lineA: i + 1, lineB: lineBIdx + 1, text: linesA[i] });
-    }
+    diffSlice(0, linesA.length - 1, 0, linesB.length - 1);
 
     // Group into Unified Diff Hunks
     const changeIndices = [];
@@ -238,10 +370,8 @@ async function handler(args, api) {
 
         const startIdx = Math.max(0, firstChangeIdx - contextSize);
         const endIdx = Math.min(fullEdits.length - 1, lastChangeIdx + contextSize);
-
         const hunkSlice = fullEdits.slice(startIdx, endIdx + 1);
 
-        // Calculate line counts for header
         let aCount = 0;
         let bCount = 0;
         let aStart = null;
@@ -275,5 +405,5 @@ async function handler(args, api) {
         }
     }
 
-    return api.cleanupText(output.join('\n'));
+    return typeof api.cleanupText === 'function' ? api.cleanupText(output.join('\n')) : output.join('\n');
 }
