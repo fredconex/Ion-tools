@@ -19,7 +19,7 @@ const TOOL_META = {
         "ask",
         "plan"
     ],
-    "permission": "auto",
+    "permission": "always",
     "toolBox": 1
 };
 
