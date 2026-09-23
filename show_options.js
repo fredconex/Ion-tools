@@ -30,7 +30,8 @@ const TOOL_META = {
                 "description": "2-4 options to present. No emojis."
             }
         },
-        "required": ["prompt", "options"]
+        "required": ["prompt", "options"],
+        "permission": "always"
     }
 };
 
