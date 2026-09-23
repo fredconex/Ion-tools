@@ -30,9 +30,9 @@ const TOOL_META = {
                 "description": "2-4 options to present. No emojis."
             }
         },
-        "required": ["prompt", "options"],
-        "permission": "always"
-    }
+        "required": ["prompt", "options"]
+    },
+    "permission": "always"
 };
 
 // Strips emojis, pictographs, symbols, and extra dangling spaces
