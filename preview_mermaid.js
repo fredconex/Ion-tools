@@ -1,10 +1,11 @@
-// preview_mermaid - tool definition.
-// Uses the { output, displayHtml } return contract:
-//   - output:      clean Mermaid syntax preserved for model context and follow-up edits.
-//   - displayHtml: interactive UI rendered in chat (never added to context).
+// preview_mermaid - tool definition for Ion / agent.html.
+// - Uses mermaid.parse for pre-flight syntax verification.
+// - Uses api.showUI for rendering the interactive vector diagram.
+// - Uses geometry-ready rendering so text labels are never measured as 0px.
+// - Respects defaultHeight configured in Settings > Tools.
 const TOOL_META = {
     "name": "preview_mermaid",
-    "description": "Renders Mermaid diagram syntax directly in chat with infinite-resolution vector zoom, cursor-centered panning, auto-fitting, and view-source toggle. The interactive preview is rendered in the chat UI, while the Mermaid code is preserved in context.",
+    "description": "Renders Mermaid diagram syntax directly in chat with infinite-resolution vector zoom, cursor-centered panning, auto-fitting, and view-source toggle. Pre-validates diagram rendering and presents an interactive preview while preserving Mermaid code in context.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -18,7 +19,7 @@ const TOOL_META = {
             },
             "height": {
                 "type": "string",
-                "description": "Optional height for the preview frame (default: '480px')."
+                "description": "Optional height for the preview frame (e.g. '360px', '480px'). Overrides the tool setting."
             }
         },
         "required": [
@@ -37,9 +38,9 @@ const TOOL_META = {
         {
             "key": "defaultHeight",
             "label": "Default Height",
-            "type": "string",
-            "default": "480px",
-            "description": "Default height applied when not specified by the model."
+            "type": "text",
+            "default": "420px",
+            "description": "Height of the diagram frame (e.g. 320px, 420px, 500px)."
         }
     ]
 };
@@ -65,7 +66,7 @@ function escapeHTMLAttr(s) {
 
 async function handler(args, api) {
     if (!args.code || typeof args.code !== 'string') {
-        return { output: "ERROR: 'code' is required." };
+        return "ERROR: 'code' is required.";
     }
 
     const cleanSyntax = args.code
@@ -74,25 +75,72 @@ async function handler(args, api) {
         .trim();
 
     if (!cleanSyntax) {
-        return { output: "ERROR: Mermaid code cannot be empty." };
+        return "ERROR: Mermaid code cannot be empty.";
     }
 
-    const defaultHeight = sanitizeHeight(await api.getSetting?.('defaultHeight'), '480px');
-    const height = sanitizeHeight(args.height, defaultHeight);
+    const lineCount = cleanSyntax.split('\n').length;
+
+    // Read the user-configured setting from Settings > Tools > preview_mermaid
+    const configuredHeight = sanitizeHeight(await api.getSetting?.('defaultHeight'), '420px');
+    const height = sanitizeHeight(args.height, configuredHeight);
     const title = (typeof args.title === 'string' && args.title.trim()) ? args.title.trim() : 'Diagram';
 
     const safeTitleAttr = escapeHTMLAttr(title);
     const safeTitleText = escapeHTMLText(title);
     const safeHeightAttr = escapeHTMLAttr(height);
 
-    // Encode diagram safely via base64
     const b64Syntax = btoa(unescape(encodeURIComponent(cleanSyntax)));
 
+    // 1) Fast syntax validation using mermaid.parse
+    const validationHtml = `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <script>
+        function reportOk() {
+            try { window.parent.postMessage({ __displayHtmlStatusOk: true }, '*'); } catch (e) {}
+        }
+        function reportErr(msg) {
+            try { window.parent.postMessage({ __displayHtmlStatusErr: String(msg || '') }, '*'); } catch (e) {}
+        }
+        window.addEventListener('error', function(e) { reportErr(e.message || 'Script error'); });
+        window.addEventListener('unhandledrejection', function(e) {
+            var r = e.reason;
+            reportErr((r && r.message) ? r.message : String(r));
+        });
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+    <script>
+        const rawCode = decodeURIComponent(escape(atob("${b64Syntax}")));
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' });
+        (async function() {
+            try {
+                await mermaid.parse(rawCode);
+                reportOk();
+            } catch (err) {
+                reportErr((err && err.message) ? err.message : String(err));
+            }
+        })();
+    </script>
+</body>
+</html>`;
+
+    if (typeof api?.validateDisplayHtml === 'function') {
+        const v = await api.validateDisplayHtml(validationHtml, { timeoutMs: 5000 });
+        if (!v || !v.ok) {
+            const errText = (v && v.error) ? v.error : 'Failed to render preview';
+            return `ERROR: Mermaid preview failed to render.\n\n${errText}\n\nCode:\n\`\`\`mermaid\n${cleanSyntax}\n\`\`\``;
+        }
+    }
+
+    // 2) Full interactive preview document with geometry-ready rendering
     const iframeHtml = `<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"><\/script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
     <style>
         * { box-sizing: border-box; }
         html, body {
@@ -103,20 +151,26 @@ async function handler(args, api) {
         }
         #viewport {
             width: 100%; height: 100%; position: relative;
-            overflow: hidden; cursor: grab;
-            background: #141414;
+            overflow: hidden; cursor: grab; background: #141414;
         }
         #viewport.dragging { cursor: grabbing; }
-        #output {
-            width: 100%; height: 100%;
+        #output { width: 100%; height: 100%; }
+
+        /* Ensure Mermaid text labels are always visible and sharp */
+        .node text, .node .label, .node span, .nodeLabel, text, tspan {
+            fill: #dcdfe7 !important;
+            color: #dcdfe7 !important;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+            font-size: 13px !important;
+            line-height: 1.4 !important;
         }
-        /* Floating zoom bar bottom-right */
+
         .zoom-bar {
-            position: absolute; bottom: 12px; right: 12px;
+            position: absolute; bottom: 10px; right: 10px;
             display: flex; align-items: center; gap: 2px;
-            background: rgba(24, 24, 24, 0.88);
+            background: rgba(24, 24, 24, 0.9);
             border: 1px solid #2e2e2e; border-radius: 6px;
-            padding: 3px; backdrop-filter: blur(4px); z-index: 10;
+            padding: 2px; backdrop-filter: blur(4px); z-index: 10;
         }
         .zoom-btn {
             background: transparent; border: none; color: #737791;
@@ -137,7 +191,6 @@ async function handler(args, api) {
 <body>
     <div id="viewport">
         <div id="output"></div>
-
         <div class="zoom-bar">
             <button type="button" class="zoom-btn" id="btn-zoom-in" title="Zoom in">+</button>
             <button type="button" class="zoom-btn" id="btn-zoom-reset" title="Fit to screen">Fit</button>
@@ -147,59 +200,76 @@ async function handler(args, api) {
 
     <script>
         const rawCode = decodeURIComponent(escape(atob("${b64Syntax}")));
+
         mermaid.initialize({
             startOnLoad: false,
             theme: 'dark',
             securityLevel: 'loose',
+            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+            flowchart: {
+                htmlLabels: true,
+                useMaxWidth: false
+            },
             themeVariables: {
                 darkmode: true,
                 background: '#141414',
                 primaryColor: '#1e293b',
                 primaryTextColor: '#dcdfe7',
                 primaryBorderColor: '#38bdf8',
-                lineColor: '#737791'
+                lineColor: '#737791',
+                textColor: '#dcdfe7',
+                nodeTextColor: '#dcdfe7',
+                mainBkg: '#1e293b'
             }
         });
 
-        let scale = 1;
-        let panX = 0;
-        let panY = 0;
-        let origW = 100;
-        let origH = 100;
-        let isDragging = false;
-        let startX = 0;
-        let startY = 0;
+        let scale = 1, panX = 0, panY = 0;
+        let bbox = { x: 0, y: 0, width: 500, height: 300 };
+        let isDragging = false, startX = 0, startY = 0;
 
         const viewport = document.getElementById('viewport');
         const output = document.getElementById('output');
-        let panGroup = null;
-        let svgElement = null;
+        let panGroup = null, svgElement = null;
 
         function updateTransform() {
             if (!panGroup) return;
-            // Native SVG vector transform (infinite resolution, never blurry)
             panGroup.setAttribute('transform', 'translate(' + panX + ', ' + panY + ') scale(' + scale + ')');
         }
 
+        function refreshBBox() {
+            if (!panGroup) return;
+            try {
+                const b = panGroup.getBBox();
+                if (b.width > 0 && b.height > 0) {
+                    bbox = { x: b.x, y: b.y, width: b.width, height: b.height };
+                }
+            } catch (e) {}
+        }
+
         function autoFit() {
-            if (!svgElement) return;
+            if (!svgElement || !panGroup) return;
             const vw = viewport.clientWidth;
             const vh = viewport.clientHeight;
             if (vw === 0 || vh === 0) return;
 
-            // Fit diagram, capping at 1.0 so small diagrams are not blown up
-            const pad = 60;
-            const fitScale = Math.min((vw - pad) / origW, (vh - pad) / origH);
-            scale = Math.min(1.0, Math.max(0.15, fitScale));
+            refreshBBox();
 
-            panX = Math.round((vw - origW * scale) / 2);
-            panY = Math.round((vh - origH * scale) / 2);
+            const padX = Math.min(60, Math.max(24, vw * 0.06));
+            const padY = Math.min(40, Math.max(20, vh * 0.06));
+
+            const fitScaleX = (vw - padX * 2) / Math.max(1, bbox.width);
+            const fitScaleY = (vh - padY * 2) / Math.max(1, bbox.height);
+            const fitScale = Math.min(fitScaleX, fitScaleY);
+
+            scale = Math.min(1.7, Math.max(0.15, fitScale));
+
+            panX = Math.round((vw - bbox.width * scale) / 2 - bbox.x * scale);
+            panY = Math.round((vh - bbox.height * scale) / 2 - bbox.y * scale);
 
             svgElement.setAttribute('viewBox', '0 0 ' + vw + ' ' + vh);
             updateTransform();
         }
 
-        // Mouse Drag Panning
         viewport.addEventListener('mousedown', (e) => {
             if (e.target.closest('.zoom-bar')) return;
             isDragging = true;
@@ -220,7 +290,6 @@ async function handler(args, api) {
             viewport.classList.remove('dragging');
         });
 
-        // Crisp Vector Cursor-Centered Zoom
         viewport.addEventListener('wheel', (e) => {
             e.preventDefault();
             if (!panGroup) return;
@@ -230,10 +299,9 @@ async function handler(args, api) {
             const cy = e.clientY - rect.top;
 
             const factor = e.deltaY < 0 ? 1.15 : 0.87;
-            const newScale = Math.max(0.1, Math.min(6.0, scale * factor));
+            const newScale = Math.max(0.1, Math.min(8.0, scale * factor));
             if (newScale === scale) return;
 
-            // Anchor point under cursor
             panX = cx - (cx - panX) * (newScale / scale);
             panY = cy - (cy - panY) * (newScale / scale);
             scale = newScale;
@@ -241,11 +309,10 @@ async function handler(args, api) {
             updateTransform();
         }, { passive: false });
 
-        // Center zoom helpers for + / - buttons
         function zoomCenter(factor) {
             const cx = viewport.clientWidth / 2;
             const cy = viewport.clientHeight / 2;
-            const newScale = Math.max(0.1, Math.min(6.0, scale * factor));
+            const newScale = Math.max(0.1, Math.min(8.0, scale * factor));
             panX = cx - (cx - panX) * (newScale / scale);
             panY = cy - (cy - panY) * (newScale / scale);
             scale = newScale;
@@ -255,9 +322,25 @@ async function handler(args, api) {
         document.getElementById('btn-zoom-in').addEventListener('click', () => zoomCenter(1.25));
         document.getElementById('btn-zoom-out').addEventListener('click', () => zoomCenter(0.8));
         document.getElementById('btn-zoom-reset').addEventListener('click', autoFit);
+        window.addEventListener('resize', () => { if (!isDragging) autoFit(); });
 
         async function renderDiagram() {
             try {
+                // Critical: Ensure viewport has non-zero width/height so Mermaid can measure text metrics
+                if (viewport.clientWidth === 0 || viewport.clientHeight === 0) {
+                    await new Promise(resolve => {
+                        const ro = new ResizeObserver(() => {
+                            if (viewport.clientWidth > 0 && viewport.clientHeight > 0) {
+                                ro.disconnect();
+                                resolve();
+                            }
+                        });
+                        ro.observe(viewport);
+                        ro.observe(document.body);
+                        setTimeout(resolve, 250);
+                    });
+                }
+
                 const uniqueId = 'mm_' + Math.random().toString(36).substring(2, 9);
                 const { svg } = await mermaid.render(uniqueId, rawCode);
                 output.innerHTML = svg;
@@ -265,41 +348,44 @@ async function handler(args, api) {
                 svgElement = output.querySelector('svg');
                 if (!svgElement) return;
 
-                // Read natural diagram bounds from viewBox
                 const vb = svgElement.getAttribute('viewBox');
                 if (vb) {
-                    const parts = vb.split(' ').map(Number);
-                    origW = parts[2] || 500;
-                    origH = parts[3] || 300;
+                    const parts = vb.trim().split(/[\\s,]+/).map(Number);
+                    bbox = {
+                        x: parts[0] || 0,
+                        y: parts[1] || 0,
+                        width: parts[2] || 500,
+                        height: parts[3] || 300
+                    };
                 }
 
-                // Make SVG fill the entire viewport canvas
+                svgElement.removeAttribute('width');
+                svgElement.removeAttribute('height');
+                svgElement.removeAttribute('style');
+                svgElement.setAttribute('preserveAspectRatio', 'none');
                 svgElement.style.width = '100%';
                 svgElement.style.height = '100%';
                 svgElement.style.display = 'block';
-                svgElement.removeAttribute('style');
-                svgElement.style.width = '100%';
-                svgElement.style.height = '100%';
 
-                // Wrap graphic nodes into an SVG <g> vector group (leaves <defs>/<style> intact)
                 panGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
                 panGroup.id = 'pan-group';
 
-                const nodesToMove = [];
-                for (let i = 0; i < svgElement.childNodes.length; i++) {
-                    const node = svgElement.childNodes[i];
-                    if (node.nodeName !== 'style' && node.nodeName !== 'defs') {
-                        nodesToMove.push(node);
-                    }
-                }
+                // Array.from prevents live NodeList index mutation glitches
+                const nodesToMove = Array.from(svgElement.childNodes).filter(node => {
+                    return node.nodeName !== 'style' && node.nodeName !== 'defs';
+                });
                 nodesToMove.forEach(node => panGroup.appendChild(node));
                 svgElement.appendChild(panGroup);
 
-                requestAnimationFrame(autoFit);
+                autoFit();
+                requestAnimationFrame(() => {
+                    autoFit();
+                    setTimeout(autoFit, 80);
+                });
             } catch (err) {
+                const msg = (err && err.message) ? err.message : String(err);
                 output.innerHTML = '<div class="error-card">⚠️ Mermaid Syntax Error<br><br>' +
-                    (err.message || String(err)).replace(/</g, '&lt;').replace(/>/g, '&gt;') +
-                    '</div>';
+                    msg.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>';
             }
         }
         renderDiagram();
@@ -307,11 +393,11 @@ async function handler(args, api) {
 </body>
 </html>`;
 
+    // 3) Display artifact
     const escapedSrcdoc = iframeHtml.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
     const escapedCode = cleanSyntax.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const lineCount = cleanSyntax.split('\n').length;
 
-    const displayHtml = `<div class="artifact-card" style="width: 100%; border: 1px solid var(--border, #2e2e2e); border-radius: 8px; overflow: hidden; background: var(--bg-panel, #161616); margin: 6px 0; font-family: var(--font-mono, monospace);">
+    const displayHtml = `<div class="artifact-card" style="width: 100%; border: 1px solid var(--border, #2e2e2e); border-radius: 8px; overflow: hidden; background: var(--bg-panel, #1a1a1a); margin: 0; font-family: var(--font-mono, monospace);">
     <!-- Top Bar -->
     <div style="display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; background: rgba(0, 0, 0, 0.25); border-bottom: 1px solid var(--border, #2e2e2e);">
         <div style="display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--fg, #dcdfe7);">
@@ -320,7 +406,6 @@ async function handler(args, api) {
             <span style="font-size: 10px; color: var(--dim, #737791);">(${lineCount} lines)</span>
         </div>
         <div style="display: flex; align-items: center; gap: 3px;">
-            <!-- Toggle Diagram / Code View Button -->
             <button type="button" class="icon-btn" title="Toggle diagram / source code"
                 onclick="(function(btn){
                     var card = btn.closest('.artifact-card');
@@ -334,7 +419,6 @@ async function handler(args, api) {
                 <span class="icon" style="font-size: 14px;">code</span>
             </button>
 
-            <!-- Copy Syntax Button -->
             <button type="button" class="icon-btn" title="Copy Mermaid syntax"
                 onclick="(function(btn){
                     var card = btn.closest('.artifact-card');
@@ -351,7 +435,6 @@ async function handler(args, api) {
                 <span class="icon" style="font-size: 14px;">content_copy</span>
             </button>
 
-            <!-- Open in New Tab Button -->
             <button type="button" class="icon-btn" title="Open in new browser tab"
                 onclick="(function(btn){
                     var card = btn.closest('.artifact-card');
@@ -369,9 +452,9 @@ async function handler(args, api) {
         </div>
     </div>
 
-    <!-- Live Mermaid Diagram Pane (Crisp Vector Pan & Zoom) -->
+    <!-- Live Mermaid Diagram Pane (no loading="lazy" to ensure immediate frame layout) -->
     <div class="artifact-preview-pane" style="width: 100%; height: ${safeHeightAttr}; background: #141414;">
-        <iframe title="${safeTitleAttr}" srcdoc="${escapedSrcdoc}" sandbox="allow-scripts" style="width: 100%; height: 100%; border: none; display: block;" loading="lazy"></iframe>
+        <iframe title="${safeTitleAttr}" srcdoc="${escapedSrcdoc}" sandbox="allow-scripts" style="width: 100%; height: 100%; border: none; display: block;"></iframe>
     </div>
 
     <!-- Code Block Pane -->
@@ -380,8 +463,7 @@ async function handler(args, api) {
     </div>
 </div>`;
 
-    // Preserves the clean Mermaid syntax in context so the model can easily inspect or modify it later
-    const output = `Rendered Mermaid diagram "${title}":\n\n\`\`\`mermaid\n${cleanSyntax}\n\`\`\``;
+    await api.showUI(displayHtml);
 
-    return { output, displayHtml };
+    return `Rendered Mermaid diagram "${title}":\n\n\`\`\`mermaid\n${cleanSyntax}\n\`\`\``;
 }
