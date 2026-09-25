@@ -52,14 +52,27 @@ const TOOL_META = {
 };
 
 async function handler(args, api) {
+    const updateStatus = (msg) => {
+        if (typeof api?.setHeaderMsg === 'function') {
+            api.setHeaderMsg(msg);
+        }
+    };
+
+    const filename = args.filepath ? (args.filepath.split(/[/\\]/).pop() || args.filepath) : 'file';
+
     // Read settings as numbers/strings; getSetting returns whatever the user configured.
-    const maxBytes        = Number(await api.getSetting("maxBytes"))        || 512;
-    const defaultBytes    = Number(await api.getSetting("defaultBytes"))    || 256;
-    const bytesPerLine    = Math.max(1, Number(await api.getSetting("bytesPerLine")) || 16);
-    const maxOutputBytes  = Number(await api.getSetting("maxOutputBytes"))  || 2048;
+    const maxBytes        = Number(await api?.getSetting?.("maxBytes"))        || 512;
+    const defaultBytes    = Number(await api?.getSetting?.("defaultBytes"))    || 256;
+    const bytesPerLine    = Math.max(1, Number(await api?.getSetting?.("bytesPerLine")) || 16);
+    const maxOutputBytes  = Number(await api?.getSetting?.("maxOutputBytes"))  || 2048;
+
+    updateStatus(`Reading ${filename}...`);
 
     const bytes = await api.readFileBytes(args.filepath);
-    if (typeof bytes === "string") return bytes; // "ERROR: ..."
+    if (typeof bytes === "string") {
+        updateStatus(`Failed reading ${filename}`);
+        return bytes; // "ERROR: ..."
+    }
 
     const offset = Math.max(0, args.offset || 0);
 
@@ -70,6 +83,8 @@ async function handler(args, api) {
     const length = Math.min(requested, maxBytes);
 
     const slice = bytes.subarray(offset, offset + length);
+
+    updateStatus(`Formatting ${slice.length}B from ${filename} @ offset 0x${offset.toString(16)}...`);
 
     // Header line so the model knows what it's looking at.
     const header =
@@ -116,6 +131,10 @@ async function handler(args, api) {
     } else if (truncatedAtCeiling) {
         footer = `\n\n[more data: call again with offset=${offset + slice.length} to continue.]`;
     }
+
+    // Final status reporting byte window and total file size
+    const hexOffset = `0x${offset.toString(16)}`;
+    updateStatus(`${filename}: dumped ${slice.length}B @ ${hexOffset} (${bytes.length}B total)`);
 
     return header + body + footer;
 }

@@ -1,7 +1,7 @@
 // fetch_url - tool definition.
 const TOOL_META = {
     "name": "fetch_url",
-    "description": "Fetch a web page or file by URL and return its text content. Tries a direct request first, then falls back to a public read-only CORS proxy for sites that block cross-origin requests (browsers cannot bypass CORS otherwise).",
+    "description": "Fetch a web page or file by URL and return its text content. Tries a direct request first, then falls back to configured public read-only CORS proxies if blocked.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -24,10 +24,87 @@ const TOOL_META = {
         "code"
     ],
     "permission": "never",
-    "toolBox": 1
+    "toolBox": 1,
+    "settings": [
+        {
+            "key": "enableDirect",
+            "label": "Enable Direct Fetch",
+            "type": "boolean",
+            "default": true,
+            "description": "Try direct request first (fastest, but may fail on CORS-restricted sites in browsers)."
+        },
+        {
+            "key": "enableJina",
+            "label": "Enable r.jina.ai",
+            "type": "boolean",
+            "default": true,
+            "description": "Use r.jina.ai reader CORS proxy (extracts clean markdown/content)."
+        },
+        {
+            "key": "enableAllorigins",
+            "label": "Enable allorigins.win",
+            "type": "boolean",
+            "default": true,
+            "description": "Use api.allorigins.win CORS proxy."
+        },
+        {
+            "key": "enableCodetabs",
+            "label": "Enable codetabs.com",
+            "type": "boolean",
+            "default": true,
+            "description": "Use api.codetabs.com CORS proxy."
+        },
+        {
+            "key": "enableCorsproxy",
+            "label": "Enable corsproxy.io",
+            "type": "boolean",
+            "default": true,
+            "description": "Use corsproxy.io CORS proxy."
+        },
+        {
+            "key": "timeoutMs",
+            "label": "Request Timeout (ms)",
+            "type": "number",
+            "default": 12000,
+            "min": 2000,
+            "max": 60000,
+            "description": "Timeout per request attempt in milliseconds."
+        },
+        {
+            "key": "maxChars",
+            "label": "Max Output Chars",
+            "type": "number",
+            "default": 15000,
+            "min": 500,
+            "max": 100000,
+            "description": "Maximum character length of returned text content."
+        }
+    ]
 };
 
 async function handler(args, api) {
+    const updateStatus = (msg) => {
+        if (typeof api?.setHeaderMsg === 'function') {
+            api.setHeaderMsg(msg);
+        }
+    };
+
+    // Helper to read boolean settings safely (handles boolean, string, or undefined)
+    async function getBoolSetting(key, defaultValue = true) {
+        if (typeof api?.getSetting !== 'function') return defaultValue;
+        const val = await api.getSetting(key);
+        if (val === undefined || val === null) return defaultValue;
+        if (typeof val === 'boolean') return val;
+        if (typeof val === 'string') return val.toLowerCase() === 'true' || val === '1';
+        return Boolean(val);
+    }
+
+    // Read configured settings
+    const timeoutSetting = Number(await api?.getSetting?.("timeoutMs"));
+    const TIMEOUT_MS = Number.isFinite(timeoutSetting) && timeoutSetting > 0 ? timeoutSetting : 12000;
+
+    const maxCharsSetting = Number(await api?.getSetting?.("maxChars"));
+    const MAX_CHARS = Number.isFinite(maxCharsSetting) && maxCharsSetting > 0 ? maxCharsSetting : 15000;
 
     // Validate URL and filter out local paths, non-HTTP protocols, and localhost
     let parsedUrl;
@@ -51,8 +128,49 @@ async function handler(args, api) {
         return `ERROR: Localhost requests (${parsedUrl.hostname}) are not supported.`;
     }
 
-    const MAX_CHARS = 15000;
-    const TIMEOUT_MS = 12000;
+    // Available providers mapped to their setting keys
+    const PROXY_DEFINITIONS = [
+        {
+            key: "enableDirect",
+            label: "direct",
+            buildUrl: (u) => u.href
+        },
+        {
+            key: "enableJina",
+            label: "r.jina.ai",
+            buildUrl: (u) => 'https://r.jina.ai/' + u.href
+        },
+        {
+            key: "enableAllorigins",
+            label: "allorigins.win",
+            buildUrl: (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u.href)
+        },
+        {
+            key: "enableCodetabs",
+            label: "codetabs.com",
+            buildUrl: (u) => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u.href)
+        },
+        {
+            key: "enableCorsproxy",
+            label: "corsproxy.io",
+            buildUrl: (u) => 'https://corsproxy.io/?url=' + encodeURIComponent(u.href)
+        }
+    ];
+
+    // Filter providers based on user settings
+    const activeAttempts = [];
+    for (const p of PROXY_DEFINITIONS) {
+        if (await getBoolSetting(p.key, true)) {
+            activeAttempts.push({
+                label: p.label,
+                url: p.buildUrl(parsedUrl)
+            });
+        }
+    }
+
+    if (activeAttempts.length === 0) {
+        return "ERROR: All proxies and direct fetch are disabled in the tool settings. Please enable at least one in settings.";
+    }
 
     function extractReadableText(html) {
         let text = html
@@ -85,17 +203,22 @@ async function handler(args, api) {
         }
     }
 
-    const attempts = [
-        { url: parsedUrl.href, label: 'direct' },
-        { url: 'https://r.jina.ai/' + parsedUrl.href, label: 'r.jina.ai' },
-        { url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(parsedUrl.href), label: 'allorigins.win' },
-        { url: 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(parsedUrl.href), label: 'codetabs.com' },
-        { url: 'https://corsproxy.io/?url=' + encodeURIComponent(parsedUrl.href), label: 'corsproxy.io' }
-    ];
-
     let result = null;
     const errors = [];
-    for (const attempt of attempts) {
+
+    for (let i = 0; i < activeAttempts.length; i++) {
+        const attempt = activeAttempts[i];
+        const stepNum = i + 1;
+        const total = activeAttempts.length;
+
+        if (attempt.label === 'direct') {
+            updateStatus(`[${stepNum}/${total}] Trying direct fetch: ${parsedUrl.hostname}...`);
+        } else if (i > 0) {
+            updateStatus(`[${stepNum}/${total}] Fallback trying proxy ${attempt.label}...`);
+        } else {
+            updateStatus(`[${stepNum}/${total}] Trying proxy ${attempt.label}...`);
+        }
+
         try {
             result = await tryFetch(attempt.url, attempt.label);
             break;
@@ -105,8 +228,11 @@ async function handler(args, api) {
     }
 
     if (!result) {
-        return `ERROR: Could not fetch ${parsedUrl.href} - direct request and all proxy fallbacks failed:\n${errors.join('\n')}\n\n(Public proxies have no uptime guarantee and can rate-limit or block certain sites/regions. If this keeps happening for the same URL, the site itself may be actively blocking proxy IP ranges.)`;
+        updateStatus(`Failed after ${activeAttempts.length} attempts`);
+        return `ERROR: Could not fetch ${parsedUrl.href} - all enabled attempts (${activeAttempts.map(a => a.label).join(', ')}) failed:\n${errors.join('\n')}\n\n(Public proxies have no uptime guarantee and can rate-limit or block certain sites/regions. If this keeps happening for the same URL, the site itself may be actively blocking proxy IP ranges.)`;
     }
+
+    updateStatus(`Extracting content via ${result.label}...`);
 
     let output = result.text;
     const isHtml = result.contentType.includes('html') || /^\s*<!doctype html|^\s*<html/i.test(output);
@@ -116,6 +242,8 @@ async function handler(args, api) {
 
     const truncated = output.length > MAX_CHARS;
     if (truncated) output = output.slice(0, MAX_CHARS);
+
+    updateStatus(`Completed via ${result.label}`);
 
     return `[fetched via ${result.label}]\n\n${output}${truncated ? `\n\n...[truncated, ${result.text.length} total chars]` : ''}`;
 }

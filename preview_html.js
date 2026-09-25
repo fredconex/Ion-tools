@@ -38,7 +38,7 @@ const TOOL_META = {
             "key": "autoRun",
             "label": "Auto-Run Preview",
             "type": "boolean",
-            "default": true,
+            "default": false,
             "description": "Automatically run the live preview without requiring an extra click on 'Show preview'."
         },
         {
