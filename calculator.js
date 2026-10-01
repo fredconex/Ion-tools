@@ -19,13 +19,18 @@ const TOOL_META = {
         "ask",
         "plan"
     ],
-    "permission": "always",
+    "permission": "ask",
     "toolBox": 1
 };
 
 async function handler(args, api) {
     if (!args.expression || typeof args.expression !== 'string') {
         return "ERROR: An 'expression' string must be provided.";
+    }
+
+    // Display the math equation in the header
+    if (api?.setHeaderMsg) {
+        api.setHeaderMsg(args.expression);
     }
 
     // Helper parser contained inside the handler

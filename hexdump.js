@@ -11,7 +11,7 @@ const TOOL_META = {
         required: ["filepath"]
     },
     modes: ["plan", "ask", "code"],
-    permission: "always",
+    permission: "ask",
     settings: [
         {
             key: "maxBytes",

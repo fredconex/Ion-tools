@@ -34,7 +34,7 @@ const TOOL_META = {
         },
         "required": ["prompt", "options"]
     },
-    "permission": "always"
+    "permission": "ask"
 };
 
 function removeEmojis(str) {

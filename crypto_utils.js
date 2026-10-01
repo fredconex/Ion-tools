@@ -23,7 +23,7 @@ const TOOL_META = {
         "required": ["action"]
     },
     "modes": ["code", "ask", "plan"],
-    "permission": "auto",
+    "permission": "ask",
     "toolBox": 1
 };
 

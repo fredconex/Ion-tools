@@ -19,7 +19,7 @@ const TOOL_META = {
         "ask",
         "code"
     ],
-    "permission": "never",
+    "permission": "ask",
     "toolBox": 1
 };
 

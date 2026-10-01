@@ -28,7 +28,7 @@ const TOOL_META = {
         "ask",
         "code"
     ],
-    "permission": "always",
+    "permission": "ask",
     "toolBox": 1
 };
 
