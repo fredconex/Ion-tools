@@ -1,7 +1,7 @@
 // show_options - presents choices and WAITS for the user to pick one.
 const TOOL_META = {
     "name": "show_options",
-    "description": "Presents 2-4 options to the user as clickable cards and WAITS for them to pick one. Returns the value of the chosen option. Use plain text only (strictly NO emojis).",
+    "description": "Presents 2-4 options to the user as clickable cards along with an optional text field for custom input, and WAITS for them to pick or enter one. Returns the value of the chosen option. Use plain text only (strictly NO emojis).",
     "interactive": true,
     "toolBox": 1,
     "expanded": true,
@@ -55,6 +55,12 @@ function buildCardsHTML(promptText, options, selectedValue) {
         + "padding:5px 10px;margin:0;border-radius:5px;"
         + "background:rgba(255,255,255,.04);text-align:left;white-space:normal;line-height:1.3;";
 
+    // Check if the selected choice was one of the predefined options
+    const isCustomChoice = selectedValue !== undefined && !options.some(opt => {
+        const val = opt.value || opt.label;
+        return val === selectedValue || opt.label === selectedValue;
+    });
+
     const buttons = options.map((opt, i) => {
         const cleanLabel = removeEmojis(opt.label) || `Option ${i + 1}`;
         const cleanDesc = removeEmojis(opt.description);
@@ -66,7 +72,7 @@ function buildCardsHTML(promptText, options, selectedValue) {
         // Determine styling based on whether an option was chosen
         let stateStyle = "cursor:pointer;border:1px solid var(--border,#333);";
         if (selectedValue !== undefined) {
-            if (value === selectedValue || opt.label === selectedValue || opt.value === selectedValue) {
+            if (!isCustomChoice && (value === selectedValue || opt.label === selectedValue || opt.value === selectedValue)) {
                 stateStyle = "cursor:default;border:1px solid var(--accent,#61afef);box-shadow:0 0 0 1px var(--accent,#61afef);";
             } else {
                 stateStyle = "cursor:default;border:1px solid var(--border,#333);opacity:0.35;";
@@ -76,15 +82,47 @@ function buildCardsHTML(promptText, options, selectedValue) {
         return `<button type="button" data-choice="${value}" style="${btnBase}${stateStyle}"><span style="display:block;font-size:12px;font-weight:600;">${label}</span>${desc}</button>`;
     }).join('');
 
+    // Bottom "Other" input field
+    let otherFieldHtml = '';
+    if (selectedValue === undefined) {
+        // Interactive state: input + submit button
+        otherFieldHtml = `
+        <div style="display:flex;gap:4px;margin-top:2px;">
+            <input 
+                type="text" 
+                id="custom-choice-input" 
+                placeholder="Other (type your own)..." 
+                style="flex:1;box-sizing:border-box;padding:5px 8px;border-radius:5px;border:1px solid var(--border,#333);background:rgba(255,255,255,.02);color:inherit;font-size:12px;outline:none;"
+                oninput="document.getElementById('custom-choice-btn').setAttribute('data-choice', this.value.trim())"
+                onkeydown="if(event.key==='Enter' && this.value.trim()){ document.getElementById('custom-choice-btn').click(); }"
+            />
+            <button 
+                type="button" 
+                id="custom-choice-btn" 
+                data-choice=""
+                onclick="const val = document.getElementById('custom-choice-input').value.trim(); if(val){ this.setAttribute('data-choice', val); } else { event.preventDefault(); event.stopPropagation(); }"
+                style="${btnBase}width:auto;padding:5px 12px;cursor:pointer;border:1px solid var(--border,#333);font-size:12px;font-weight:600;text-align:center;">
+                Submit
+            </button>
+        </div>`;
+    } else {
+        // Completed state: show custom choice if chosen, otherwise dimmed
+        if (isCustomChoice) {
+            otherFieldHtml = `<div style="${btnBase}cursor:default;border:1px solid var(--accent,#61afef);box-shadow:0 0 0 1px var(--accent,#61afef);margin-top:2px;"><span style="display:block;font-size:12px;font-weight:600;">Other: ${esc(selectedValue)}</span></div>`;
+        } else {
+            otherFieldHtml = `<div style="${btnBase}cursor:default;border:1px solid var(--border,#333);opacity:0.35;margin-top:2px;"><span style="font-size:12px;">Other</span></div>`;
+        }
+    }
+
     const cleanPrompt = removeEmojis(promptText) || "Please select an option:";
-    return `<div class="choice-card" style="display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid var(--border,#2e2e2e);border-radius:6px;background:var(--bg-panel,#181818);margin:2px 0;white-space:normal;"><div style="font-size:12.5px;font-weight:500;margin:0 0 2px 0;">${esc(cleanPrompt)}</div>${buttons}</div>`;
+    return `<div class="choice-card" style="display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid var(--border,#2e2e2e);border-radius:6px;background:var(--bg-panel,#181818);margin:2px 0;white-space:normal;"><div style="font-size:12.5px;font-weight:500;margin:0 0 2px 0;">${esc(cleanPrompt)}</div>${buttons}${otherFieldHtml}</div>`;
 }
 
 async function handler(args, api) {
     const options = (args.options || []).slice(0, 4);
     if (options.length < 2) return "ERROR: provide at least 2 options.";
 
-    // 1. Render interactive clickable buttons
+    // 1. Render interactive clickable buttons with custom input field
     const initialHtml = buildCardsHTML(args.prompt, options);
     const result = await api.showUI(initialHtml);
 
@@ -93,10 +131,11 @@ async function handler(args, api) {
     }
 
     // 2. Build the completed display with selected item highlighted and others faint
-    const completedHtml = buildCardsHTML(args.prompt, options, result.choice);
+    const choice = removeEmojis(result.choice);
+    const completedHtml = buildCardsHTML(args.prompt, options, choice);
 
     return {
-        output: `User selected: ${result.choice}`,
+        output: `User selected: ${choice}`,
         displayHtml: completedHtml
     };
 }
