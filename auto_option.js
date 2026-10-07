@@ -1,7 +1,8 @@
 // auto_option - like show_options, but a decision model picks the option.
 // Backend: llama.cpp server /v1/systemone (decision models: Julia-1, Laya, Kev-4B, lev, OpenJev).
-// The model is chosen with the "Decision Model" picker (populated from .agent/models.json);
-// its URL, model name and API key are taken from that provider entry.
+// The model is chosen with the "Decision Model" picker (populated from .agent/models.json).
+// The tool only ever sees an opaque model UUID: Ion resolves it to the URL, model name and API key
+// and makes the request itself (api.callModel), so this tool never has access to connection details.
 const TOOL_META = {
     "name": "auto_option",
     "description": "Picks one of 2-10 options automatically using a local decision model (llama.cpp /v1/systemone) instead of asking the user. The model scores every option in a single forward pass and returns the winner with a probability and confidence. Give each option a clear description: it greatly improves accuracy. Provide a 'state' with the context the decision depends on. If confidence is below the configured cutoff, the tool reports LOW_CONFIDENCE so you can ask the user with show_options instead. Plain text only (strictly NO emojis).",
@@ -51,7 +52,7 @@ const TOOL_META = {
             "label": "Decision Model",
             "type": "model",
             "default": "",
-            "description": "Pick a decision model from your models.json providers (it must be a decision model such as Kev-4B, Julia-1, Laya, lev or OpenJev). Its URL, model name and API key are used automatically."
+            "description": "Pick a decision model from your models.json providers (it must be a decision model such as Kev-4B, Julia-1, Laya, lev or OpenJev). Ion connects to it for this tool; the tool never sees its URL or API key."
         },
         {
             "key": "minConfidence",
@@ -85,14 +86,6 @@ function removeEmojis(str) {
 
 function esc(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-function normalizeEndpoint(raw) {
-    let u = String(raw || '').trim().replace(/\/+$/, '');
-    if (!u) u = 'http://localhost:8080';
-    if (/\/systemone$/i.test(u)) return u;
-    if (/\/v1$/i.test(u)) return u + '/systemone';
-    return u + '/v1/systemone';
 }
 
 // status: 'pending' | 'done' | 'low' | 'error'
@@ -164,21 +157,14 @@ async function handler(args, api) {
         return (v === undefined || v === null || v === '') ? d : v;
     };
 
-    // Connection comes entirely from the picked model (models.json).
-    const pickedId = String(await getSetting('decisionModel', '')).trim();
-    if (!pickedId) {
+    // The setting holds an opaque model UUID. Ion does the connecting; no URL or key is visible here.
+    const modelId = String(await getSetting('decisionModel', '')).trim();
+    if (!modelId) {
         return 'ERROR: no decision model selected. Pick one in the tool settings (Settings > Tools > auto_option > Decision Model), or ask the user with show_options instead.';
     }
-    if (typeof api?.getModelInfo !== 'function') {
-        return 'ERROR: this version of Ion does not support the model picker (api.getModelInfo is missing). Update Ion.';
+    if (typeof api?.callModel !== 'function') {
+        return 'ERROR: this version of Ion does not support secure model calls (api.callModel is missing). Update Ion.';
     }
-    const info = await api.getModelInfo(pickedId);
-    if (!info || !info.url) {
-        return `ERROR: the selected decision model "${pickedId}" was not found in models.json. Pick another one in the tool settings.`;
-    }
-    const endpoint = normalizeEndpoint(info.url);
-    const model = String(info.model || '').trim();
-    const apiKey = String(info.key || '').trim();
 
     const timeoutNum = Number(await getSetting('timeoutMs', 15000));
     const TIMEOUT_MS = Number.isFinite(timeoutNum) && timeoutNum > 0 ? timeoutNum : 15000;
@@ -208,54 +194,28 @@ async function handler(args, api) {
             }
         }
     };
-    if (model) body.model = model;
-
-    const headers = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
     const fail = (msg, note) => ({
         output: `ERROR: ${msg}`,
         displayHtml: buildResultHTML(args.prompt, options, { status: 'error', note: note || msg })
     });
 
-    // ---- call the decision model ----
-    updateStatus(`Asking decision model: ${endpoint}`);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    // ---- call the decision model (Ion attaches the URL, key and model name) ----
+    updateStatus('Asking decision model...');
     let data;
     try {
-        // Returns { ok, status, text }. Prefers Ion's main-thread bridge (api.httpPost): tools run in a
-        // sandboxed iframe with an opaque origin that browsers block from reaching localhost.
-        // Falls back to a direct fetch when the bridge is not available.
-        let r;
-        if (typeof api?.httpPost === 'function') {
-            const br = await api.httpPost(endpoint, {
-                headers: { ...headers, 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-                timeoutMs: TIMEOUT_MS
-            });
-            if (br && br.error) {
-                updateStatus('Decision model call failed');
-                return fail(`could not reach ${endpoint} (${br.error}). Check that llama-server is running and the provider URL in models.json is correct.`, 'unreachable');
-            }
-            r = br;
-        } else {
-            const post = (contentType) => fetch(endpoint, {
-                method: 'POST',
-                headers: { ...headers, 'Content-Type': contentType },
-                body: JSON.stringify(body),
-                signal: controller.signal
-            });
-            let res;
-            try {
-                res = await post('application/json');
-            } catch (e) {
-                if (e.name === 'AbortError') throw e;
-                // Network-level failure: retry as a CORS-simple request (no preflight).
-                updateStatus('Retrying without CORS preflight...');
-                res = await post('text/plain;charset=UTF-8');
-            }
-            r = { ok: res.ok, status: res.status, text: await res.text() };
+        const r = await api.callModel(modelId, {
+            path: '/v1/systemone',
+            body: JSON.stringify(body),
+            timeoutMs: TIMEOUT_MS
+        });
+
+        if (!r || r.error) {
+            updateStatus('Decision model call failed');
+            const err = r && r.error;
+            if (err === 'timeout') return fail(`decision model timed out after ${TIMEOUT_MS / 1000}s.`, 'timeout');
+            if (err === 'unreachable') return fail('could not reach the decision model. Check that llama-server is running and the provider URL in models.json is correct.', 'unreachable');
+            return fail(`${err || 'decision model call failed'}. Re-pick the Decision Model in the tool settings.`, err || 'call failed');
         }
 
         if (!r.ok) {
@@ -274,10 +234,7 @@ async function handler(args, api) {
         }
     } catch (e) {
         updateStatus('Decision model call failed');
-        if (e.name === 'AbortError') return fail(`decision endpoint timed out after ${TIMEOUT_MS / 1000}s (${endpoint}).`, 'timeout');
-        return fail(`could not reach ${endpoint} (${e.message}). Check that llama-server is running and the provider URL in models.json is correct.`, 'unreachable');
-    } finally {
-        clearTimeout(timer);
+        return fail(`decision model call failed (${e.message}).`, 'call failed');
     }
 
     // ---- parse answer ----
@@ -291,7 +248,7 @@ async function handler(args, api) {
     const probs = ans.probabilities || {};
     const topProb = typeof probs[chosenKey] === 'number' ? probs[chosenKey] : null;
     const confidence = typeof ans.confidence === 'number' ? ans.confidence : topProb;
-    const usedModel = data.model || model || '';
+    const usedModel = data.model || '';
 
     const matched = options.find(o => o.key === chosenKey);
     if (!matched) {
