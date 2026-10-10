@@ -38,11 +38,11 @@ async function handler(args, api) {
     }
 
     // 1. Check existence
-    if (typeof api.exists === 'function') {
-        if (!(await api.exists(args.file_a))) {
+    if (typeof api.fileExists === 'function') {
+        if (!(await api.fileExists(args.file_a))) {
             throw new Error(`File does not exist: '${args.file_a}'`);
         }
-        if (!(await api.exists(args.file_b))) {
+        if (!(await api.fileExists(args.file_b))) {
             throw new Error(`File does not exist: '${args.file_b}'`);
         }
     }
