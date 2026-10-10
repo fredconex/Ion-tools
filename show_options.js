@@ -1,7 +1,7 @@
 // show_options - presents choices and WAITS for the user to pick one.
 const TOOL_META = {
     "name": "show_options",
-    "description": "Presents 2-4 options to the user as clickable cards along with an optional text field for custom input, and WAITS for them to pick or enter one. Returns the value of the chosen option. Use plain text only (strictly NO emojis).",
+    "description": "Presents 2-6 options to the user as clickable cards along with an optional text field for custom input, and WAITS for them to pick or enter one. Returns the value of the chosen option. Use plain text only (strictly NO emojis).",
     "interactive": true,
     "toolBox": 1,
     "expanded": true,
@@ -29,7 +29,7 @@ const TOOL_META = {
                     },
                     "required": ["label", "value"]
                 },
-                "description": "2-4 options to present. No emojis."
+                "description": "2-6 options to present. No emojis."
             }
         },
         "required": ["prompt", "options"]
@@ -47,15 +47,20 @@ function removeEmojis(str) {
 }
 
 function esc(s) {
-    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    return String(s || '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[c]));
 }
 
 function buildCardsHTML(promptText, options, selectedValue) {
     const btnBase = "all:unset;display:block;width:100%;box-sizing:border-box;"
-        + "padding:5px 10px;margin:0;border-radius:5px;"
-        + "background:rgba(255,255,255,.04);text-align:left;white-space:normal;line-height:1.3;";
+        + "padding:6px 10px;margin:0;border-radius:6px;"
+        + "background:rgba(255,255,255,.04);text-align:left;white-space:normal;line-height:1.35;";
 
-    // Check if the selected choice was one of the predefined options
     const isCustomChoice = selectedValue !== undefined && !options.some(opt => {
         const val = opt.value || opt.label;
         return val === selectedValue || opt.label === selectedValue;
@@ -64,65 +69,66 @@ function buildCardsHTML(promptText, options, selectedValue) {
     const buttons = options.map((opt, i) => {
         const cleanLabel = removeEmojis(opt.label) || `Option ${i + 1}`;
         const cleanDesc = removeEmojis(opt.description);
-        const value = esc(opt.value || opt.label || `option_${i + 1}`);
+        const value = opt.value || opt.label || `option_${i + 1}`;
         const label = esc(cleanLabel);
         const desc = cleanDesc
-            ? `<span style="display:block;font-size:10.5px;opacity:.65;margin-top:1px;">${esc(cleanDesc)}</span>` : '';
+            ? `<span style="display:block;font-size:10.5px;opacity:.65;margin-top:2px;">${esc(cleanDesc)}</span>` : '';
 
-        // Determine styling based on whether an option was chosen
         let stateStyle = "cursor:pointer;border:1px solid var(--border,#333);";
         if (selectedValue !== undefined) {
-            if (!isCustomChoice && (value === selectedValue || opt.label === selectedValue || opt.value === selectedValue)) {
-                stateStyle = "cursor:default;border:1px solid var(--accent,#61afef);box-shadow:0 0 0 1px var(--accent,#61afef);";
+            if (!isCustomChoice && (value === selectedValue || opt.label === selectedValue)) {
+                stateStyle = "cursor:default;border:1px solid var(--accent,var(--primary,#61afef));box-shadow:0 0 0 1px var(--accent,var(--primary,#61afef));background:rgba(255,255,255,.08);";
             } else {
                 stateStyle = "cursor:default;border:1px solid var(--border,#333);opacity:0.35;";
             }
         }
 
-        return `<button type="button" data-choice="${value}" style="${btnBase}${stateStyle}"><span style="display:block;font-size:12px;font-weight:600;">${label}</span>${desc}</button>`;
+        return `<button type="button" data-choice="${esc(value)}" style="${btnBase}${stateStyle}"><span style="display:block;font-size:12px;font-weight:600;">${label}</span>${desc}</button>`;
     }).join('');
 
-    // Bottom "Other" input field
     let otherFieldHtml = '';
     if (selectedValue === undefined) {
-        // Interactive state: input + submit button
+        // Scoped using relative DOM access instead of global IDs
         otherFieldHtml = `
-        <div style="display:flex;gap:4px;margin-top:2px;">
+        <div style="display:flex;gap:4px;margin-top:3px;">
             <input 
                 type="text" 
-                id="custom-choice-input" 
                 placeholder="Other (type your own)..." 
                 style="flex:1;box-sizing:border-box;padding:5px 8px;border-radius:5px;border:1px solid var(--border,#333);background:rgba(255,255,255,.02);color:inherit;font-size:12px;outline:none;"
-                oninput="document.getElementById('custom-choice-btn').setAttribute('data-choice', this.value.trim())"
-                onkeydown="if(event.key==='Enter' && this.value.trim()){ document.getElementById('custom-choice-btn').click(); }"
+                oninput="this.nextElementSibling.setAttribute('data-choice', this.value.trim())"
+                onkeydown="if(event.key==='Enter' && this.value.trim()){ event.preventDefault(); this.nextElementSibling.click(); }"
             />
             <button 
                 type="button" 
-                id="custom-choice-btn" 
                 data-choice=""
-                onclick="const val = document.getElementById('custom-choice-input').value.trim(); if(val){ this.setAttribute('data-choice', val); } else { event.preventDefault(); event.stopPropagation(); }"
-                style="${btnBase}width:auto;padding:5px 12px;cursor:pointer;border:1px solid var(--border,#333);font-size:12px;font-weight:600;text-align:center;">
+                onclick="(function(btn){ var inp = btn.previousElementSibling; var val = inp ? inp.value.trim() : ''; if(val){ btn.setAttribute('data-choice', val); } else { event.preventDefault(); event.stopPropagation(); } })(this)"
+                style="${btnBase}width:auto;padding:5px 14px;cursor:pointer;border:1px solid var(--border,#333);font-size:12px;font-weight:600;text-align:center;">
                 Submit
             </button>
         </div>`;
     } else {
-        // Completed state: show custom choice if chosen, otherwise dimmed
         if (isCustomChoice) {
-            otherFieldHtml = `<div style="${btnBase}cursor:default;border:1px solid var(--accent,#61afef);box-shadow:0 0 0 1px var(--accent,#61afef);margin-top:2px;"><span style="display:block;font-size:12px;font-weight:600;">Other: ${esc(selectedValue)}</span></div>`;
+            otherFieldHtml = `<div style="${btnBase}cursor:default;border:1px solid var(--accent,var(--primary,#61afef));box-shadow:0 0 0 1px var(--accent,var(--primary,#61afef));margin-top:3px;background:rgba(255,255,255,.08);"><span style="display:block;font-size:12px;font-weight:600;">Other: ${esc(selectedValue)}</span></div>`;
         } else {
-            otherFieldHtml = `<div style="${btnBase}cursor:default;border:1px solid var(--border,#333);opacity:0.35;margin-top:2px;"><span style="font-size:12px;">Other</span></div>`;
+            otherFieldHtml = `<div style="${btnBase}cursor:default;border:1px solid var(--border,#333);opacity:0.35;margin-top:3px;"><span style="font-size:12px;">Other</span></div>`;
         }
     }
 
     const cleanPrompt = removeEmojis(promptText) || "Please select an option:";
-    return `<div class="choice-card" style="display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid var(--border,#2e2e2e);border-radius:6px;background:var(--bg-panel,#181818);margin:2px 0;white-space:normal;"><div style="font-size:12.5px;font-weight:500;margin:0 0 2px 0;">${esc(cleanPrompt)}</div>${buttons}${otherFieldHtml}</div>`;
+    return `<div class="choice-card" style="display:flex;flex-direction:column;gap:5px;padding:8px 10px;border:1px solid var(--border,#2e2e2e);border-radius:8px;background:var(--bg-panel,#181818);margin:2px 0;white-space:normal;"><div style="font-size:12.5px;font-weight:600;color:var(--fg,#ececf1);margin:0 0 2px 0;">${esc(cleanPrompt)}</div>${buttons}${otherFieldHtml}</div>`;
 }
 
 async function handler(args, api) {
-    const options = (args.options || []).slice(0, 4);
-    if (options.length < 2) return "ERROR: provide at least 2 options.";
+    const options = (args.options || []).slice(0, 6);
+    if (options.length < 2) {
+        return "ERROR: Provide at least 2 options.";
+    }
 
-    // 1. Render interactive clickable buttons with custom input field
+    if (api?.setHeaderMsg) {
+        api.setHeaderMsg("Awaiting user selection...");
+    }
+
+    // 1. Render interactive buttons and wait for user interaction
     const initialHtml = buildCardsHTML(args.prompt, options);
     const result = await api.showUI(initialHtml);
 
@@ -130,12 +136,13 @@ async function handler(args, api) {
         return "User cancelled the selection without choosing.";
     }
 
-    // 2. Build the completed display with selected item highlighted and others faint
+    // 2. Build final rendered card with selected option highlighted
     const choice = removeEmojis(result.choice);
     const completedHtml = buildCardsHTML(args.prompt, options, choice);
 
     return {
         output: `User selected: ${choice}`,
-        displayHtml: completedHtml
+        displayHtml: completedHtml,
+        summary: `Selected: ${choice}`
     };
 }
