@@ -94,6 +94,12 @@ function buildCardsHTML(promptText, options, selectedValue) {
             <input 
                 type="text" 
                 placeholder="Other (type your own)..." 
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
+                spellcheck="false"
+                data-lpignore="true"
+                data-1p-ignore="true"
                 style="flex:1;box-sizing:border-box;padding:5px 8px;border-radius:5px;border:1px solid var(--border,#333);background:rgba(255,255,255,.02);color:inherit;font-size:12px;outline:none;"
                 oninput="this.nextElementSibling.setAttribute('data-choice', this.value.trim())"
                 onkeydown="if(event.key==='Enter' && this.value.trim()){ event.preventDefault(); this.nextElementSibling.click(); }"
