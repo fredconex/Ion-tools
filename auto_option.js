@@ -175,9 +175,10 @@ async function handler(args, api) {
 
     // ---- show pending card ----
     const pendingHtml = buildResultHTML(args.prompt, options, { status: 'pending' });
+    // Transient frame (live): never stored, so an early ERROR return can't leave a stale
+    // "asking..." card behind. The final card below replaces it.
     if (typeof api?.showUI === 'function') {
-        // Non-blocking display: do not await a user choice
-        try { api.showUI(pendingHtml); } catch (_) { /* display is best-effort */ }
+        try { await api.showUI(pendingHtml, { live: true }); } catch (_) { /* display is best-effort */ }
     }
 
     // ---- build /v1/systemone request ----
@@ -195,10 +196,16 @@ async function handler(args, api) {
         }
     };
 
-    const fail = (msg, note) => ({
-        output: `ERROR: ${msg}`,
-        displayHtml: buildResultHTML(args.prompt, options, { status: 'error', note: note || msg })
-    });
+    // Final result card (display-only; the last showUI call wins).
+    const showResult = async (info) => {
+        if (typeof api?.showUI !== 'function') return;
+        try { await api.showUI(buildResultHTML(args.prompt, options, info)); } catch (_) { /* best-effort */ }
+    };
+
+    const fail = async (msg, note) => {
+        await showResult({ status: 'error', note: note || msg });
+        return { output: `ERROR: ${msg}` };
+    };
 
     // ---- call the decision model (Ion attaches the URL, key and model name) ----
     updateStatus('Asking decision model...');
@@ -263,18 +270,18 @@ async function handler(args, api) {
     // ---- confidence gate ----
     if (cutoff > 0 && confidence !== null && confidence < cutoff) {
         updateStatus('Decision model: low confidence');
+        await showResult({ status: 'low', chosen: chosenKey, probs, confidence, model: usedModel });
         return {
             output: `LOW_CONFIDENCE: decision model's top pick was "${chosenKey}" but confidence ${confidence.toFixed(3)} is below the cutoff ${cutoff}. `
-                + `Probabilities - ${probSummary}. No decision was made; ask the user (e.g. with show_options) or gather more context.`,
-            displayHtml: buildResultHTML(args.prompt, options, { status: 'low', chosen: chosenKey, probs, confidence, model: usedModel })
+                + `Probabilities - ${probSummary}. No decision was made; ask the user (e.g. with show_options) or gather more context.`
         };
     }
 
     updateStatus(`Decision model chose: ${chosenKey}`);
+    await showResult({ status: 'done', chosen: chosenKey, probs, confidence, model: usedModel });
     return {
         output: `Decision model selected: ${chosenKey}`
             + (confidence !== null ? ` (confidence ${confidence.toFixed(3)})` : '')
-            + `. Probabilities - ${probSummary}.`,
-        displayHtml: buildResultHTML(args.prompt, options, { status: 'done', chosen: chosenKey, probs, confidence, model: usedModel })
+            + `. Probabilities - ${probSummary}.`
     };
 }

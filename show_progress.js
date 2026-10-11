@@ -350,8 +350,7 @@ async function handler(args, api) {
         palette
     );
 
-    return {
-        output: headerMsg,
-        displayHtml: progressHtml
-    };
+    await api.showUI(progressHtml);
+
+    return { output: headerMsg };
 }

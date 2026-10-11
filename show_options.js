@@ -146,9 +146,12 @@ async function handler(args, api) {
     const choice = removeEmojis(result.choice);
     const completedHtml = buildCardsHTML(args.prompt, options, choice);
 
+    // The completed card still contains data-choice attributes, so autoResolve:true tells the
+    // host it is display-only and must NOT wait for another click.
+    await api.showUI(completedHtml, { autoResolve: true });
+
     return {
         output: `User selected: ${choice}`,
-        displayHtml: completedHtml,
         summary: `Selected: ${choice}`
     };
 }

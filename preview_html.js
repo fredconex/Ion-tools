@@ -488,7 +488,7 @@ async function handler(args, api) {
 </div>`;
 
     // 4) Render via showUI
-    //await api.showUI(displayHtml);
+    await api.showUI(displayHtml);
 
     // 5) Build Comprehensive Diagnostic Output for Model Context
     let output = `Rendered ${args.filepath} (${lineCount} line${lineCount === 1 ? '' : 's'}) with live preview in chat.`;
@@ -514,5 +514,5 @@ async function handler(args, api) {
         output += `\nStatus: Clean — No console errors, runtime warnings, or HTML syntax issues detected.`;
     }
 
-    return {output, displayHtml};
+    return { output };
 }

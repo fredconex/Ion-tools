@@ -2101,5 +2101,7 @@ async function finish(out, changedFiles, shownImages, r, notes, targetPath, api,
     const displayHtml = buildCard({
         label: displayLabel, badge, secs, out, images, codeStr: String(code || '')
     });
-    return { output: text, displayHtml };
+    // Replaces the transient live frames. A display failure must not lose a long run's output.
+    try { await api.showUI(displayHtml); } catch (_) { /* display is best-effort */ }
+    return { output: text };
 }

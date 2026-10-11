@@ -619,12 +619,9 @@ async function handler(args, api) {
     </div>
 </div>`;
 
-    if (typeof api?.showUI === 'function') {
-        await api.showUI(displayHtml);
-    }
+    await api.showUI(displayHtml);
 
     return {
-        output: `Successfully rendered ${displayType} chart titled "${title}".`,
-        displayHtml
+        output: `Successfully rendered ${displayType} chart titled "${title}".`
     };
 }
